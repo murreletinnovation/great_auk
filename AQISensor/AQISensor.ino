@@ -1,12 +1,10 @@
-#include <Wire.h>
 #include <bsec.h>
+#include <MQTTClient.h>
 #include <WiFiClientSecure.h>
 #include "WiFi.h"
-#include "certs.h"
 #include <MQTTClient.h>
 #include <ArduinoJson.h>
-
-#define LOG(fmt, ...) (Serial.printf("%09llu: " fmt "\n", GetTimestamp(), ##__VA_ARGS__))
+#include "certs.h"
 
 const char *SSID = "TacoCorp";
 const char *WiFiPassword = "albertross";
@@ -23,11 +21,20 @@ const char *WiFiPassword = "albertross";
 // How many times we should attempt to connect to AWS
 #define AWS_MAX_RECONNECT_TRIES 50
 
-WiFiClientSecure net = WiFiClientSecure();
+Bsec iaqSensor;
 MQTTClient client = MQTTClient(256);
 
-Bsec iaqSensor;
-String output;
+WiFiClientSecure net = WiFiClientSecure();
+
+  bsec_virtual_sensor_t sensorList[7] = {
+    BSEC_OUTPUT_RAW_TEMPERATURE,
+    BSEC_OUTPUT_RAW_PRESSURE,
+    BSEC_OUTPUT_RAW_HUMIDITY,
+    BSEC_OUTPUT_RAW_GAS,
+    BSEC_OUTPUT_IAQ,
+    BSEC_OUTPUT_STATIC_IAQ,
+    BSEC_OUTPUT_CO2_EQUIVALENT,
+  };
 
 void connectToWiFi()
 {
@@ -84,23 +91,21 @@ void connectToAWS()
   Serial.println("Connected!");
 }
 
-void sendJsonToAWS()
+void sendJsonToAWS(float temp, float humidity, float iaq)
 {
   StaticJsonDocument<512> jsonDoc;
   JsonObject stateObj = jsonDoc.createNestedObject("state");
   JsonObject reportedObj = stateObj.createNestedObject("reported");
   
-  // Write the temperature & humidity. Here you can use any C++ type (and you can refer to variables)
-  reportedObj["temperature"] = 23.76;
-  reportedObj["humidity"] = 78.12;
-  reportedObj["wifi_strength"] = WiFi.RSSI();
+  reportedObj["temperature"] = temp;
+  reportedObj["humidity"] = humidity;
+  reportedObj["iaq"] = iaq;
   
   // Create a nested object "location"
   JsonObject locationObj = reportedObj.createNestedObject("location");
   locationObj["name"] = "Murrelet";
 
   Serial.println("Publishing message to AWS...");
-  //serializeJson(doc, Serial);
   char jsonBuffer[512];
   serializeJson(jsonDoc, jsonBuffer);
 
@@ -110,6 +115,8 @@ void sendJsonToAWS()
 // Helper function definitions
 void checkIaqSensorStatus(void)
 {
+  String output;
+  
   if (iaqSensor.status != BSEC_OK) {
     if (iaqSensor.status < BSEC_OK) {
       output = "BSEC error code : " + String(iaqSensor.status);
@@ -133,48 +140,33 @@ void checkIaqSensorStatus(void)
   }
 }
 
-void setup() {
-	Serial.begin(115200);
+void setup() 
+{
+  String output;
+  
+  Serial.begin(115200);
   Wire.begin();
-
+  
   iaqSensor.begin(BME680_I2C_ADDR_SECONDARY, Wire);
-  output = "\nBSEC library version " + String(iaqSensor.version.major) + "." + String(iaqSensor.version.minor) + "." + String(iaqSensor.version.major_bugfix) + "." + String(iaqSensor.version.minor_bugfix);
-  Serial.println(output);
   checkIaqSensorStatus();
-
-  bsec_virtual_sensor_t sensorList[10] = {
-    BSEC_OUTPUT_RAW_TEMPERATURE,
-    BSEC_OUTPUT_RAW_PRESSURE,
-    BSEC_OUTPUT_RAW_HUMIDITY,
-    BSEC_OUTPUT_RAW_GAS,
-    BSEC_OUTPUT_IAQ,
-  };
-
-  iaqSensor.updateSubscription(sensorList, 10, BSEC_SAMPLE_RATE_LP);
+  iaqSensor.updateSubscription(sensorList, 7, BSEC_SAMPLE_RATE_LP);
   checkIaqSensorStatus();
 
   connectToWiFi();
   connectToAWS();
 
-  // Print the header
-  output = "Timestamp [ms], raw temperature [°C], pressure [hPa], raw relative humidity [%], gas [Ohm], IAQ, IAQ accuracy, temperature [°C], relative humidity [%], Static IAQ, CO2 equivalent, breath VOC equivalent";
+  output = "Timestamp [ms], raw temperature [°C], pressure [hPa], raw relative humidity [%], gas [Ohm], IAQ, static IAQ, CO2 equivalent";
   Serial.println(output); 
 }
 
-void loop() {
+void loop() 
+{
   unsigned long time_trigger = millis();
-  if (iaqSensor.run()) { // If new data is available
-    output = String(time_trigger);
-    output += ", " + String(iaqSensor.rawTemperature);
-    output += ", " + String(iaqSensor.pressure);
-    output += ", " + String(iaqSensor.rawHumidity);
-    output += ", " + String(iaqSensor.gasResistance);
-    output += ", " + String(iaqSensor.iaq);
-    Serial.println(output);
+  if (iaqSensor.run()) 
+  {
+    sendJsonToAWS(iaqSensor.rawTemperature, iaqSensor.rawHumidity, iaqSensor.iaq);
+    client.loop();
   } else {
     checkIaqSensorStatus();
   }
-//  sendJsonToAWS();
-//  client.loop();
-//  delay(1000); 
 }
