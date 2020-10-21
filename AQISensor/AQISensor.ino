@@ -2,7 +2,6 @@
 #include <MQTTClient.h>
 #include <WiFiClientSecure.h>
 #include "WiFi.h"
-#include <MQTTClient.h>
 #include <ArduinoJson.h>
 #include "certs.h"
 #include <SD.h>
@@ -63,6 +62,8 @@ void connectToWiFi()
  
   Serial.print(F("Connected. My IP address is: "));
   Serial.println(WiFi.localIP());
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
 }
 
 void connectToAWS()
@@ -113,7 +114,6 @@ void sendJsonToAWS(uint32_t timestamp, float temperature, float humidity, float 
   JsonObject locationObj = reportedObj.createNestedObject("location");
   locationObj["name"] = "Murrelet_HQ";
 
-  Serial.println("Publishing message to AWS...");
   char jsonBuffer[512];
   serializeJson(jsonDoc, jsonBuffer);
 
@@ -166,7 +166,7 @@ void setup()
   
   iaqSensor.begin(BME680_I2C_ADDR_SECONDARY, Wire);
   checkIaqSensorStatus();
-  iaqSensor.updateSubscription(sensorList, 4, BSEC_SAMPLE_RATE_LP);
+  iaqSensor.updateSubscription(sensorList, 4, BSEC_SAMPLE_RATE_ULP);
   checkIaqSensorStatus();
 
   connectToWiFi();
@@ -195,11 +195,27 @@ void loop()
     unix_timestamp = now.unixtime();
     logFile = SD.open(logFilename, FILE_APPEND);
     output = String(unix_timestamp) + "," + iaqSensor.rawTemperature + "," + iaqSensor.rawHumidity + "," + iaqSensor.iaq + "," + iaqSensor.co2Equivalent;
-    Serial.println(output);
+    //Serial.println(output);
     logFile.println(output);
     logFile.close();
-    sendJsonToAWS(unix_timestamp, iaqSensor.rawTemperature, iaqSensor.rawHumidity, iaqSensor.iaq, iaqSensor.co2Equivalent);
-    client.loop();
+    
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      if (!client.connect(DEVICE_NAME))
+      {
+        Serial.println("Can't connect to AWS");
+      }
+      else
+      {
+        sendJsonToAWS(unix_timestamp, iaqSensor.rawTemperature, iaqSensor.rawHumidity, iaqSensor.iaq, iaqSensor.co2Equivalent);
+        client.loop();
+      }
+    }
+    else
+    {
+      Serial.println("Lost WIFI Connection!");
+      WiFi.reconnect();
+    }
   } else {
     checkIaqSensorStatus();
   }
