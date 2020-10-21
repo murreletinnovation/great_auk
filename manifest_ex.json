@@ -1,9 +1,8 @@
 { 
     "fileLocations": [                                                    
-              {"URIPrefixes": ["https://s3.amazonaws.com/aqisensormurreletinnovation/aggregate/2020/10/07/21/"]}
+              {"URIPrefixes": ["s3://aqi-kinesis/source"]}
      ],
      "globalUploadSettings": { 
-     "format": "CSV",  
-     "delimiter": ","
+     	"format": "JSON"
     }
 }
