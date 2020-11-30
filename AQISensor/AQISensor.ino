@@ -7,9 +7,10 @@
 #include <SD.h>
 #include "FS.h"
 #include "RTClib.h"
+#include "Adafruit_PM25AQI.h"
 
-const char *SSID = "TacoCorp";
-const char *WiFiPassword = "albertross";
+const char *SSID = "crusoe";
+const char *WiFiPassword = "1L0veWalks";
 
 // The name of the device. This MUST match up with the name defined in the AWS console
 #define DEVICE_NAME "AQISensor00"
@@ -30,11 +31,19 @@ RTC_PCF8523 rtc;
 
 WiFiClientSecure net = WiFiClientSecure();
 
-bsec_virtual_sensor_t sensorList[7] = {
+Adafruit_PM25AQI aqi = Adafruit_PM25AQI();
+
+bsec_virtual_sensor_t sensorList[10] = {
     BSEC_OUTPUT_RAW_TEMPERATURE,
+    BSEC_OUTPUT_RAW_PRESSURE,
     BSEC_OUTPUT_RAW_HUMIDITY,
+    BSEC_OUTPUT_RAW_GAS,
     BSEC_OUTPUT_IAQ,
+    BSEC_OUTPUT_STATIC_IAQ,
     BSEC_OUTPUT_CO2_EQUIVALENT,
+    BSEC_OUTPUT_BREATH_VOC_EQUIVALENT,
+    BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE,
+    BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY
 };
 
 const int chipSelect = 33;
@@ -98,21 +107,19 @@ void connectToAWS()
   Serial.println("Connected!");
 }
 
-void sendJsonToAWS(uint32_t timestamp, float temperature, float humidity, float iaq, float co2)
+void sendJsonToAWS(uint32_t timestamp, float temperature, float humidity, float iaq, int staticIaqAccuracy, int pm10, int pm25, int pm100)
 {
   StaticJsonDocument<512> jsonDoc;
-  JsonObject stateObj = jsonDoc.createNestedObject("state");
-  JsonObject reportedObj = stateObj.createNestedObject("reported");
 
-  reportedObj["timestamp"] = timestamp;
-  reportedObj["temperature"] = temperature;
-  reportedObj["humidity"] = humidity;
-  reportedObj["iaq"] = iaq;
-  reportedObj["co2"] = co2;
-  
-  // Create a nested object "location"
-  JsonObject locationObj = reportedObj.createNestedObject("location");
-  locationObj["name"] = "Murrelet_HQ";
+  jsonDoc["timestamp"] = timestamp;
+  jsonDoc["temperature"] = temperature;
+  jsonDoc["humidity"] = humidity;
+  jsonDoc["iaq"] = iaq;
+  jsonDoc["iaq_accuracy"] = staticIaqAccuracy;
+  jsonDoc["pm_10"] = pm10;
+  jsonDoc["pm_25"] = pm25;
+  jsonDoc["pm_100"] = pm100;
+  jsonDoc["name"] = "Murrelet_HQ";
 
   char jsonBuffer[512];
   serializeJson(jsonDoc, jsonBuffer);
@@ -151,13 +158,20 @@ void setup()
   String output;
   
   Serial.begin(115200);
-  Wire.begin();\
+  Wire.begin();
   
   if (! rtc.begin()) {
     Serial.println("Couldn't find RTC");
     Serial.flush();
     abort();
   }
+  
+  if (! rtc.initialized() || rtc.lostPower()) {
+      Serial.println("RTC is NOT initialized, let's set the time!");
+      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+
+  rtc.start();
 
   if (!SD.begin(chipSelect)) {
     Serial.println("Card init. failed!");
@@ -166,7 +180,7 @@ void setup()
   
   iaqSensor.begin(BME680_I2C_ADDR_SECONDARY, Wire);
   checkIaqSensorStatus();
-  iaqSensor.updateSubscription(sensorList, 4, BSEC_SAMPLE_RATE_ULP);
+  iaqSensor.updateSubscription(sensorList, 10, BSEC_SAMPLE_RATE_LP);
   checkIaqSensorStatus();
 
   connectToWiFi();
@@ -177,44 +191,55 @@ void setup()
   
   logFilename = "/log_" + epochString + ".csv";
   logFile = SD.open(logFilename, FILE_WRITE);
-  output = "timestamp,raw_temperature,raw_relative_humidity,iaq,co2_equivalent";
+  output = "timestamp,raw_temperature,raw_relative_humidity,iaq,iaq_accuracy";
   logFile.println(output);
   logFile.close();
 
   rtc.start();
+
+  delay(1000);
+  if (! aqi.begin_I2C())
+  {
+    Serial.println("Could not find PM 2.5 sensor!");
+    abort();
+  }
 }
 
 void loop() 
 {
   String output;
   uint32_t unix_timestamp;
+  PM25_AQI_Data data;
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("Lost WIFI Connection!");
+    WiFi.reconnect();
+  }
   
   DateTime now = rtc.now();
+
+  if (!aqi.read(&data))
+  {
+    Serial.println("Could not read from AQI");
+  }
+  
   if (iaqSensor.run()) 
   {
     unix_timestamp = now.unixtime();
     logFile = SD.open(logFilename, FILE_APPEND);
-    output = String(unix_timestamp) + "," + iaqSensor.rawTemperature + "," + iaqSensor.rawHumidity + "," + iaqSensor.iaq + "," + iaqSensor.co2Equivalent;
-    //Serial.println(output);
+    output = String(unix_timestamp) + "," + iaqSensor.temperature + "," + iaqSensor.humidity + "," + iaqSensor.staticIaq + "," + iaqSensor.staticIaqAccuracy + "," + data.pm10_standard + "," + data.pm25_standard + "," + data.pm100_standard;
     logFile.println(output);
     logFile.close();
     
-    if (WiFi.status() == WL_CONNECTED)
+    if (!client.connect(DEVICE_NAME))
     {
-      if (!client.connect(DEVICE_NAME))
-      {
-        Serial.println("Can't connect to AWS");
-      }
-      else
-      {
-        sendJsonToAWS(unix_timestamp, iaqSensor.rawTemperature, iaqSensor.rawHumidity, iaqSensor.iaq, iaqSensor.co2Equivalent);
-        client.loop();
-      }
+      Serial.println("Can't connect to AWS");
     }
     else
     {
-      Serial.println("Lost WIFI Connection!");
-      WiFi.reconnect();
+      sendJsonToAWS(unix_timestamp, iaqSensor.temperature, iaqSensor.humidity, iaqSensor.staticIaq, iaqSensor.staticIaqAccuracy, data.pm10_standard, data.pm25_standard, data.pm100_standard);
+      client.loop();
     }
   } else {
     checkIaqSensorStatus();
